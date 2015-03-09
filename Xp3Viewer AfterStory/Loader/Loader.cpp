@@ -77,18 +77,17 @@ NTSTATUS InjectDllToRemoteProcess(HANDLE hProcess, HANDLE hThread, PUNICODE_STRI
 
 	PVOID BaseAddress; //VirtualMemoryµÿ÷∑
 	ULONG VMSize; //VirtualMemory¥Û–°
-	ULONG FreeSize;
-
+	
 	PVOID pShellCode;
 	ULONG CodeLength;
 
-	ULONG ReturnedLength;
-
 	VM_PARAMETER VmPara;
-
 
 	LARGE_INTEGER Interval;
 	CONTEXT Context; 
+
+	ULONG ReturnedLength;
+	ULONG FreeSize;
 
 	ThreadHandle = hThread;
 	ProcessHandle = hProcess;
