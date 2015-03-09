@@ -1,19 +1,36 @@
 #include <Windows.h>
+#include <shlobj.h>
 #include "../Share/ntsdk.h"
+
+#pragma pack(1)
+//目标地址空间执行ShellCode时所需的参数
+//以下5个变量将拷贝到目标进程地址空间，声明顺序不可改变
+typedef struct _VM_PARAMETER
+{
+	DWORD Eip;
+	PVOID LdrLoadDllAddr;
+	SHORT DllPathLength1;
+	SHORT DllPathLength2;
+	CHAR *DllPathVMAddr; //DllFullPath 在 VirtualMemory 中的地址
+}VM_PARAMETER;
+
+#pragma pack()
 
 BYTE ShellCode[] =
 {
-	0x50,//									push    eax;						eax = 0x00401000
+	//0xcc,//									int3;								用于调试
+	0x50,//									push    eax;						eax = oep
 	0x60,//									pushad
 	0x9C,//									pushfd
 	0xE8, 0x00,0x00, 0x00, 0x00,//			call    $+5
 	0x5E,//									pop     esi;						即此条指令地址弹出到esi
 	0x81, 0xE6, 0x00, 0xF0, 0xFF, 0xFF,//	and     esi, 0xFFFFF000;			空间首地址，即BaseAddress
 	0xAD,//									lods    dword ptr[esi];				初始eip(即RtlUserThreadStart)存至eax
-	0x89, 0x44, 0x24, 0x24,//				mov     dword ptr[esp + 0x24], eax;	后面popad弹出到eip
+	0x89, 0x44, 0x24, 0x24,//				mov     dword ptr[esp + 0x24], eax;	后面popad弹出
 	0xAD,//									lods    dword ptr[esi];				LdrLoadDll地址
 	0x33, 0xC9,//							xor     ecx, ecx
 	0x51,//									push    ecx
+	0x54,//									push    esp
 	0x56,//									push    esi
 	0x51,//									push    ecx
 	0x51,//									push    ecx
@@ -27,7 +44,7 @@ BYTE ShellCode[] =
 };
 
 
-INT CalcInterval(PLARGE_INTEGER pInterval, UINT n) //不知道什么用途
+INT SetInterval(PLARGE_INTEGER pInterval, UINT n) //转换时间间隔
 {
 	int Result;
 
@@ -39,7 +56,7 @@ INT CalcInterval(PLARGE_INTEGER pInterval, UINT n) //不知道什么用途
 	}
 	else
 	{
-		*(QWORD *)pInterval = -10000i64 * n;
+		*(QWORD*)pInterval = -10000i64 * n;
 		Result = (int)pInterval;
 	}
 	return Result;
@@ -51,12 +68,12 @@ NTSTATUS InjectDllToRemoteProcess(HANDLE hProcess, HANDLE hThread, PUNICODE_STRI
 	HANDLE ProcessHandle;
 	HANDLE ThreadHandle;
 	
-	ULONG DllPathLength; 
+	volatile ULONG DllPathLength; 
 
 	NTSTATUS Status; 
 	NTSTATUS Result;
 
-	signed int v11; 
+	signed int Delay; 
 
 	PVOID BaseAddress; //VirtualMemory地址
 	ULONG VMSize; //VirtualMemory大小
@@ -66,15 +83,9 @@ NTSTATUS InjectDllToRemoteProcess(HANDLE hProcess, HANDLE hThread, PUNICODE_STRI
 	ULONG CodeLength;
 
 	ULONG ReturnedLength;
-	//以下5个变量将拷贝到目标进程地址空间，声明顺序不可改变
 
-#pragma pack(1)	//这里没搞懂怎么取消变量对齐，以及如何避免Release版中把这几个变量优化掉到问题
-	DWORD Eip;
-	PVOID LdrLoadDllAddr;
-	SHORT DllPathLength1;
-	SHORT DllPathLength2;
-	CHAR *DllPathVMAddr; //DllFullPath 在 VirtualMemory 中的地址
-#pragma pack()
+	VM_PARAMETER VmPara;
+
 
 	LARGE_INTEGER Interval;
 	CONTEXT Context; 
@@ -97,45 +108,49 @@ NTSTATUS InjectDllToRemoteProcess(HANDLE hProcess, HANDLE hThread, PUNICODE_STRI
 
 			pShellCode = (void*)ShellCode;
 			CodeLength = sizeof(ShellCode);
-			LdrLoadDllAddr = LdrLoadDll;
-			Eip = Context.Eip;
-			DllPathVMAddr = (char*)BaseAddress + 16;
 
-			DllPathLength1 = DllPathLength;
-			DllPathLength2 = DllPathLength;
+			VmPara.Eip = Context.Eip;
+			VmPara.LdrLoadDllAddr = LdrLoadDll;	
+			VmPara.DllPathLength1 = DllPathLength;
+			VmPara.DllPathLength2 = DllPathLength;
+			VmPara.DllPathVMAddr = (char*)BaseAddress + sizeof(VM_PARAMETER);
 
-			FreeSize = 0;
+			FreeSize = 0;//无实际用途
 			
-			Status = NtWriteVirtualMemory(ProcessHandle, BaseAddress, &Eip, 16, &ReturnedLength); //将栈中Eip开始的16个字节拷贝到目标地址空间
+			//写参数
+			Status = NtWriteVirtualMemory(ProcessHandle, BaseAddress, (PVOID)&VmPara, sizeof(VM_PARAMETER), &ReturnedLength); //将栈中Eip开始的sizeof(VM_PARAMETER)个字节拷贝到目标地址空间
 			if (NT_SUCCESS(Status))
 			{
-				Status = NtWriteVirtualMemory(ProcessHandle, (char*)BaseAddress + 16, *(PVOID*)((char*)DllFullPath + 4), DllPathLength, &ReturnedLength);
+				//写Dll路径
+				Status = NtWriteVirtualMemory(ProcessHandle, (char*)BaseAddress + sizeof(VM_PARAMETER), *(PVOID*)((char*)DllFullPath + 4), DllPathLength, &ReturnedLength);
 				if (NT_SUCCESS(Status))
 				{
-					Context.Eip = (DWORD)((char*)BaseAddress + DllPathLength + 31) & 0xFFFFFFF0;
-					Status = NtWriteVirtualMemory(ProcessHandle, (PVOID)((DWORD)((char *)BaseAddress + DllPathLength + 31) & 0xFFFFFFF0), ShellCode, CodeLength, &ReturnedLength);
+					Context.Eip = (DWORD)((char*)BaseAddress + DllPathLength + sizeof(VM_PARAMETER));
+					//写ShellCode
+					Status = NtWriteVirtualMemory(ProcessHandle, (PVOID)((DWORD)((char*)BaseAddress + DllPathLength + sizeof(VM_PARAMETER))), pShellCode, CodeLength, &ReturnedLength);
 					if (NT_SUCCESS(Status))
 					{
 						Status = NtSetContextThread(ThreadHandle, &Context);
 						if (NT_SUCCESS(Status))
 						{
 							NtGetContextThread(ThreadHandle, &Context);
-							Status = NtResumeThread(ThreadHandle, NULL);
+							Status = NtResumeThread(ThreadHandle, NULL); //恢复线程以执行ShellCode
+							
 							if (NT_SUCCESS(Status))
 							{
-								CalcInterval(&Interval, 500);
-								v11 = 30;
+								SetInterval(&Interval, 500);
+								Delay = 5; //等待的循环次数
 								
 								while (1)
 								{
-									Status = NtReadVirtualMemory(ProcessHandle, BaseAddress, &ShellCode, 4, &ReturnedLength);
+									Status = NtReadVirtualMemory(ProcessHandle, BaseAddress, &pShellCode, 4, &ReturnedLength);
 									if (!NT_SUCCESS(Status))
 										break;
 									if (pShellCode)
 									{
 										NtDelayExecution(0, &Interval);
-										--v11;
-										if (v11)
+										--Delay;
+										if (Delay)
 											continue;
 									}
 
@@ -157,6 +172,7 @@ NTSTATUS InjectDllToRemoteProcess(HANDLE hProcess, HANDLE hThread, PUNICODE_STRI
 									return Result;
 								}
 							}
+							
 						}
 					}
 				}
@@ -193,7 +209,7 @@ VOID InitAPIAddress()
 }
 
 
-ULONG Nt_GetExeDirectory(WCHAR* FullPath, ULONG WstrLen)
+ULONG GetExeDirectory(WCHAR* FullPath, ULONG WstrLen)
 {
 	ULONG i;
 	ULONG DirectoryLength;
@@ -217,12 +233,58 @@ ULONG Nt_GetExeDirectory(WCHAR* FullPath, ULONG WstrLen)
 	return DirectoryLength;
 }
 
-int __cdecl main(int argc, char *argv[])
+PWCHAR GetBaseName(PWCHAR FullName)
+{
+	ULONG i;
+	ULONG WstrLen = wcslen(FullName);
+
+	for (i = WstrLen; i != 0; i--)
+	{
+		WCHAR wc = *(FullName + i - 1);
+		if (wc == L'\\' || wc == L'/')
+			break;
+	}
+
+	if (i == WstrLen)
+		return NULL;
+	if (i == 0)
+		return FullName;
+
+	return &FullName[i];
+}
+
+BOOL GetPathFromLinkFile(WCHAR* ShortcutFile, WCHAR* buffer, int nSize)
+{
+	HRESULT           hres;
+	IShellLink        *psl;
+	IPersistFile      *ppf;
+	WIN32_FIND_DATA   fd;
+
+	CoInitialize(NULL);
+	hres = CoCreateInstance(CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, IID_IShellLink, (void**)&psl);
+	if (!SUCCEEDED(hres))
+		return false;
+
+	hres = psl->QueryInterface(IID_IPersistFile, (void**)&ppf);
+	if (SUCCEEDED(hres))
+	{
+		hres = ppf->Load(ShortcutFile, STGM_READ);
+		if (SUCCEEDED(hres))
+			//hres = psl->GetPath(buffer, nSize, &fd, 0); //??
+		ppf->Release();
+	}
+
+	psl->Release();
+	CoUninitialize();
+	return SUCCEEDED(hres);
+}
+
+int __cdecl main(int argc, wchar_t* argv[])
 {
 	
 	NTSTATUS            Status;
 	BOOLEAN				IsEnabled;
-	WCHAR               ExePath[MAX_NTPATH], szDllPath[MAX_NTPATH], FullExePath[MAX_NTPATH];
+	WCHAR               *pExePath, szDllPath[MAX_NTPATH], FullExePath[MAX_NTPATH];
 	STARTUPINFOW        si;
 	PROCESS_INFORMATION pi;
 	
@@ -234,12 +296,10 @@ int __cdecl main(int argc, char *argv[])
 	RtlAdjustPrivilege(SE_DEBUG_PRIVILEGE, TRUE, FALSE, &IsEnabled);
 	while (--argc)
 	{
-		wcscpy(ExePath, L"LOVESICK_PUPPIES.exe");
-		/*
-		pExePath = findextw(*++argv);
-		if (CHAR_UPPER4W(*(PULONG64)pExePath) == CHAR_UPPER4W(TAG4W('.LNK')))
+		pExePath = GetBaseName(*++argv);
+		if (wcsstr(pExePath, L".LNK") || wcsstr(pExePath, L".lnk"))
 		{
-			if (FAILED(GetPathFromLinkFile(*argv, FullExePath, countof(FullExePath))))
+			if (FAILED(GetPathFromLinkFile(*argv, FullExePath, wcslen(FullExePath))))
 			{
 				pExePath = *argv;
 			}
@@ -252,16 +312,15 @@ int __cdecl main(int argc, char *argv[])
 		{
 			pExePath = *argv;
 		}
-		*/
-		RtlGetFullPathName_U(ExePath, sizeof(szDllPath), szDllPath, NULL);
+		
+		RtlGetFullPathName_U(pExePath, sizeof(szDllPath), szDllPath, NULL);
 
-		//rmnamew(szDllPath);
-		Nt_GetExeDirectory(szDllPath, wcslen(szDllPath));
+		GetExeDirectory(szDllPath, wcslen(szDllPath));
 		ZeroMemory(&si, sizeof(si));
 		si.cb = sizeof(si);
 		Status = CreateProcessInternalW(
 			NULL,
-			ExePath,
+			pExePath,
 			NULL,
 			NULL,
 			NULL,
@@ -282,7 +341,7 @@ int __cdecl main(int argc, char *argv[])
 		ULONG Length;
 		UNICODE_STRING DllFullPath;
 
-		Length = Nt_GetExeDirectory(szDllPath, wcslen(szDllPath));
+		Length = GetExeDirectory(szDllPath, wcslen(szDllPath));
 		wcscpy(szDllPath + Length, L"XP3Viewer.dll");
 		DllFullPath.Buffer = szDllPath;
 		DllFullPath.Length = (USHORT)(Length + wcslen(L"XP3Viewer.dll"));
