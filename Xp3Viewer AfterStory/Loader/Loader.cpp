@@ -1,3 +1,8 @@
+
+#ifndef UNICODE
+#define UNICODE
+#endif
+
 #include <Windows.h>
 #include <shlobj.h>
 #include "../Share/ntsdk.h"
@@ -204,7 +209,7 @@ fnCreateProcessInternalW CreateProcessInternalW;
 
 VOID InitAPIAddress()
 {
-	CreateProcessInternalW = (fnCreateProcessInternalW)GetProcAddress(GetModuleHandle("kernel32.dll"), "CreateProcessInternalW");
+	CreateProcessInternalW = (fnCreateProcessInternalW)GetProcAddress(GetModuleHandle(L"kernel32.dll"), "CreateProcessInternalW");
 }
 
 
@@ -278,7 +283,7 @@ BOOL GetPathFromLinkFile(WCHAR* ShortcutFile, WCHAR* buffer, int nSize)
 	return SUCCEEDED(hres);
 }
 
-int __cdecl main(int argc, wchar_t* argv[])
+int __cdecl wmain(int argc, wchar_t* argv[])
 {
 	
 	NTSTATUS            Status;
