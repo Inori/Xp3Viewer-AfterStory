@@ -105,8 +105,8 @@ NTSTATUS InjectDllToRemoteProcess(HANDLE hProcess, HANDLE hThread, PUNICODE_STRI
 			DllPathLength2 = DllPathLength;
 
 			FreeSize = 0;
-
-			Status = NtWriteVirtualMemory(ProcessHandle, BaseAddress, &Eip, 16, &ReturnedLength);
+			
+			Status = NtWriteVirtualMemory(ProcessHandle, BaseAddress, &Eip, 16, &ReturnedLength); //将栈中Eip开始的16个字节拷贝到目标地址空间
 			if (NT_SUCCESS(Status))
 			{
 				Status = NtWriteVirtualMemory(ProcessHandle, (char*)BaseAddress + 16, *(PVOID*)((char*)DllFullPath + 4), DllPathLength, &ReturnedLength);
