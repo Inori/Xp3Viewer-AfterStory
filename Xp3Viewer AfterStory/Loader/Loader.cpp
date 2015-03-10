@@ -31,7 +31,7 @@ BYTE ShellCode[] =
 	0x5E,//									pop     esi;						即此条指令地址弹出到esi
 	0x81, 0xE6, 0x00, 0xF0, 0xFF, 0xFF,//	and     esi, 0xFFFFF000;			空间首地址，即BaseAddress
 	0xAD,//									lods    dword ptr[esi];				初始eip(即RtlUserThreadStart)存至eax
-	0x89, 0x44, 0x24, 0x24,//				mov     dword ptr[esp + 0x24], eax;	后面popad弹出
+	0x89, 0x44, 0x24, 0x24,//				mov     dword ptr[esp + 0x24], eax;	ShellCode返回地址
 	0xAD,//									lods    dword ptr[esi];				LdrLoadDll地址
 	0x33, 0xC9,//							xor     ecx, ecx
 	0x51,//									push    ecx
@@ -122,13 +122,14 @@ NTSTATUS InjectDllToRemoteProcess(HANDLE hProcess, HANDLE hThread, PUNICODE_STRI
 			FreeSize = 0;//无实际用途
 			
 			//写参数
-			Status = NtWriteVirtualMemory(ProcessHandle, BaseAddress, (PVOID)&VmPara, sizeof(VM_PARAMETER), &ReturnedLength); //将栈中Eip开始的sizeof(VM_PARAMETER)个字节拷贝到目标地址空间
+			Status = NtWriteVirtualMemory(ProcessHandle, BaseAddress, (PVOID)&VmPara, sizeof(VM_PARAMETER), &ReturnedLength);
 			if (NT_SUCCESS(Status))
 			{
 				//写Dll路径
 				Status = NtWriteVirtualMemory(ProcessHandle, (char*)BaseAddress + sizeof(VM_PARAMETER), *(PVOID*)((char*)DllFullPath + 4), DllPathLength, &ReturnedLength);
 				if (NT_SUCCESS(Status))
 				{
+					//Eip至于ShellCode入口
 					Context.Eip = (DWORD)((char*)BaseAddress + DllPathLength + sizeof(VM_PARAMETER));
 					//写ShellCode
 					Status = NtWriteVirtualMemory(ProcessHandle, (PVOID)((DWORD)((char*)BaseAddress + DllPathLength + sizeof(VM_PARAMETER))), pShellCode, CodeLength, &ReturnedLength);
@@ -274,7 +275,7 @@ BOOL GetPathFromLinkFile(WCHAR* ShortcutFile, WCHAR* buffer, int nSize)
 	{
 		hres = ppf->Load(ShortcutFile, STGM_READ);
 		if (SUCCEEDED(hres))
-			//hres = psl->GetPath(buffer, nSize, &fd, 0); //??
+			hres = psl->GetPath(buffer, nSize, &fd, 0); //??
 		ppf->Release();
 	}
 
@@ -292,20 +293,22 @@ int __cdecl wmain(int argc, wchar_t* argv[])
 	STARTUPINFOW        si;
 	PROCESS_INFORMATION pi;
 	
-	if (argc == 1)
-		return -1;
+	if (argc != 2)
+		return STATUS_UNSUCCESSFUL;
 
 	InitAPIAddress();
 
 	RtlAdjustPrivilege(SE_DEBUG_PRIVILEGE, TRUE, FALSE, &IsEnabled);
-	while (--argc)
+
+	pExePath = GetBaseName(argv[1]);
+	if (pExePath)
 	{
-		pExePath = GetBaseName(*++argv);
 		if (wcsstr(pExePath, L".LNK") || wcsstr(pExePath, L".lnk"))
 		{
-			if (FAILED(GetPathFromLinkFile(*argv, FullExePath, wcslen(FullExePath))))
+			ZeroMemory(FullExePath, sizeof(FullExePath));
+			if (FAILED(GetPathFromLinkFile(argv[1], FullExePath, sizeof(FullExePath)/2)))
 			{
-				pExePath = *argv;
+				pExePath = argv[1];
 			}
 			else
 			{
@@ -314,9 +317,9 @@ int __cdecl wmain(int argc, wchar_t* argv[])
 		}
 		else
 		{
-			pExePath = *argv;
+			pExePath = argv[1];
 		}
-		
+
 		RtlGetFullPathName_U(pExePath, sizeof(szDllPath), szDllPath, NULL);
 
 		GetExeDirectory(szDllPath, wcslen(szDllPath));
@@ -339,7 +342,8 @@ int __cdecl wmain(int argc, wchar_t* argv[])
 		if (!Status)
 		{
 			//PrintConsoleW(L"%s: CreateProcess() failed\n", pExePath);
-			continue;
+			//continue;
+			return STATUS_UNSUCCESSFUL;
 		}
 
 		ULONG Length;
